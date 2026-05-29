@@ -10,7 +10,7 @@
     "dev:desktop": "cd packages/desktop && bunx vite",
     "dev:mobile": "cd packages/mobile && bunx expo start",
     "build:web": "cd packages/web && bun run build",
-    "start": "bun --env-file=.env packages/web/server.ts",
+    "start": "bun packages/web/server.ts",
     "build": "cd packages/web && bun run build",
     "typecheck": "turbo typecheck",
     "db:generate": "turbo db:generate",

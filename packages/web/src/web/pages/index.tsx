@@ -3,8 +3,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Search, Users, FileText, CreditCard, Wallet, MapPin, Filter,
   X, TrendingUp, Trash2, Upload, Plus, BarChart2, AlertCircle,
-  CheckCircle, Clock, Edit, History, DollarSign,
+  CheckCircle, Clock, Edit, History, DollarSign, Receipt, Printer, Download,
 } from "lucide-react";
+import jsPDF from "jspdf";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
@@ -21,6 +22,12 @@ type Payment = {
   id: number; caseId: number; date: string; amount: number;
   method: string; createdAt: string;
 };
+type ReceiptItem = { perkara: string; harga: number };
+type Receipt = {
+  id: number; tarikh: string; tarikhDisplay: string; kategori: string;
+  nama: string; alamat: string; items: string; jumlah: number;
+  bakiTerdahulu: number; bakiTerkini: number; butiran: string; createdAt: string;
+};
 
 const formatRM = (n: number) =>
   new Intl.NumberFormat("en-MY", { style: "currency", currency: "MYR", minimumFractionDigits: 2 }).format(n);
@@ -29,7 +36,7 @@ const PIE_COLORS = ["#2563eb", "#059669", "#d97706", "#dc2626", "#7c3aed", "#089
 
 export default function Index() {
   const qc = useQueryClient();
-  const [activeTab, setActiveTab] = useState<"dashboard" | "records" | "reports">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "records" | "reports" | "resit">("dashboard");
   const [searchTerm, setSearchTerm] = useState("");
   const [filterKes, setFilterKes] = useState("Semua");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -38,6 +45,7 @@ export default function Index() {
   const [deletingCase, setDeletingCase] = useState<Case | null>(null);
   const [isDeletingSelected, setIsDeletingSelected] = useState(false);
   const [isNewOpen, setIsNewOpen] = useState(false);
+  const seededRef = useRef(false);
   const [paymentHistoryCase, setPaymentHistoryCase] = useState<Case | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -68,12 +76,17 @@ export default function Index() {
   });
 
   useEffect(() => {
-    if (casesQ.isFetched && casesQ.data && casesQ.data.length === 0) {
+    // Only seed once on first load — never re-seed after user deletes records
+    if (casesQ.isFetched && casesQ.data && casesQ.data.length === 0 && !seededRef.current) {
+      seededRef.current = true;
       fetch(`${API}/seed`, { method: "POST" }).then(() => {
         qc.invalidateQueries({ queryKey: ["cases"] });
         qc.invalidateQueries({ queryKey: ["stats"] });
         qc.invalidateQueries({ queryKey: ["chart"] });
       });
+    }
+    if (casesQ.isFetched && casesQ.data && casesQ.data.length > 0) {
+      seededRef.current = true; // data exists, mark seed as done
     }
   }, [casesQ.isFetched, casesQ.data]);
 
@@ -185,6 +198,7 @@ export default function Index() {
     { id: "dashboard", label: "Papan Pemuka", icon: <BarChart2 size={15} /> },
     { id: "records",   label: "Rekod Pelanggan", icon: <FileText size={15} /> },
     { id: "reports",   label: "Laporan", icon: <TrendingUp size={15} /> },
+    { id: "resit",     label: "Sistem Resit", icon: <Receipt size={15} /> },
   ] as const;
 
   return (
@@ -222,7 +236,7 @@ export default function Index() {
         <header className="min-h-14 bg-white border-b border-zinc-200 flex flex-wrap items-center justify-between gap-2 px-4 md:px-6 py-3 shrink-0">
           <div className="flex items-center gap-3">
             <h1 className="text-sm font-semibold text-zinc-700">
-              {activeTab === "dashboard" ? "Papan Pemuka" : activeTab === "records" ? "Rekod Pelanggan" : "Laporan Kewangan"}
+              {activeTab === "dashboard" ? "Papan Pemuka" : activeTab === "records" ? "Rekod Pelanggan" : activeTab === "reports" ? "Laporan Kewangan" : "Sistem Resit"}
             </h1>
             <span className="px-2 py-0.5 bg-blue-50 text-blue-700 text-[10px] font-bold rounded uppercase border border-blue-100">Live</span>
           </div>
@@ -270,6 +284,7 @@ export default function Index() {
           {activeTab === "reports" && (
             <ReportsTab cases={cases} stats={stats} chartData={chartData} isLoading={casesQ.isLoading} />
           )}
+          {activeTab === "resit" && <ResitTab />}
         </div>
       </main>
 
@@ -1041,6 +1056,397 @@ function FormField({ label, children }: { label: string; children: React.ReactNo
     <div>
       <label className="block text-xs font-medium text-zinc-500 mb-1">{label}</label>
       {children}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════
+   SISTEM RESIT — Jana, simpan, cetak & PDF resit
+══════════════════════════════════════════════════ */
+function ResitTab() {
+  const qc = useQueryClient();
+  const [editId, setEditId] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
+  const [previewData, setPreviewData] = useState<any>(null);
+  const [showForm, setShowForm] = useState(true);
+
+  // Form state
+  const [tarikh, setTarikh] = useState(() => new Date().toISOString().split("T")[0]);
+  const [kategori, setKategori] = useState("DOKUMEN");
+  const [nama, setNama] = useState("");
+  const [alamat, setAlamat] = useState("");
+  const [items, setItems] = useState<ReceiptItem[]>([{ perkara: "Fee/Deposit", harga: 0 }]);
+  const [bakiTerdahulu, setBakiTerdahulu] = useState(0);
+  const [butiran, setButiran] = useState("");
+
+  const jumlah = items.reduce((s, i) => s + (i.harga || 0), 0);
+  const bakiTerkini = bakiTerdahulu - jumlah;
+
+  const receiptsQ = useQuery<Receipt[]>({
+    queryKey: ["receipts"],
+    queryFn: async () => {
+      const r = await fetch(`${API}/receipts`);
+      const d = await r.json();
+      return d.receipts;
+    },
+  });
+
+  const saveReceipt = useMutation({
+    mutationFn: async (data: any) => {
+      const url = editId ? `${API}/receipts/${editId}` : `${API}/receipts`;
+      const method = editId ? "PUT" : "POST";
+      const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+      return r.json();
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["receipts"] }); resetForm(); },
+  });
+
+  const deleteReceipt = useMutation({
+    mutationFn: async (id: number) => {
+      await fetch(`${API}/receipts/${id}`, { method: "DELETE" });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["receipts"] }),
+  });
+
+  function resetForm() {
+    setEditId(null);
+    setTarikh(new Date().toISOString().split("T")[0]);
+    setKategori("DOKUMEN");
+    setNama("");
+    setAlamat("");
+    setItems([{ perkara: "Fee/Deposit", harga: 0 }]);
+    setBakiTerdahulu(0);
+    setButiran("");
+    setPreviewData(null);
+  }
+
+  function loadEdit(r: Receipt) {
+    setEditId(r.id);
+    setTarikh(r.tarikh);
+    setKategori(r.kategori);
+    setNama(r.nama);
+    setAlamat(r.alamat);
+    setItems(JSON.parse(r.items || "[]"));
+    setBakiTerdahulu(r.bakiTerdahulu);
+    setButiran(r.butiran);
+    setShowForm(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function buildData() {
+    const d = new Date(tarikh);
+    const tarikhDisplay = `${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear()}`;
+    return {
+      tarikh, tarikhDisplay,
+      kategori: kategori.toUpperCase(),
+      nama: nama.toUpperCase(),
+      alamat: alamat.toUpperCase(),
+      items: items.map(i => ({ perkara: i.perkara.toUpperCase(), harga: i.harga })),
+      jumlah, bakiTerdahulu, bakiTerkini, butiran: butiran.toUpperCase(),
+    };
+  }
+
+  function handlePreview() {
+    if (!nama.trim()) return alert("Sila masukkan nama pelanggan.");
+    setPreviewData(buildData());
+  }
+
+  function handleSimpan() {
+    if (!nama.trim()) return alert("Sila masukkan nama pelanggan.");
+    const data = buildData();
+    setPreviewData(data);
+    saveReceipt.mutate(data);
+  }
+
+  function handleCetak() {
+    if (!previewData) { handlePreview(); return; }
+    setTimeout(() => window.print(), 200);
+  }
+
+  function handlePDF() {
+    if (!previewData) { alert("Klik PREVIEW dahulu."); return; }
+    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a5" });
+    const f = (n: number) => n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const pw = doc.internal.pageSize.getWidth();
+    let y = 15;
+
+    // Header
+    doc.setFontSize(13); doc.setFont("helvetica", "bold");
+    doc.text("TETUAN HAIRI MUSTAFA & ASSOCIATES", pw / 2, y, { align: "center" }); y += 5;
+    doc.setFontSize(8); doc.setFont("helvetica", "italic");
+    doc.text("PEGUAM SYARIE * PESURUHJAYA SUMPAH", pw / 2, y, { align: "center" }); y += 4;
+    doc.setFont("helvetica", "normal");
+    doc.text("LOT 02, BANGUNAN ARKED MARA, 09100 BALING, KEDAH", pw / 2, y, { align: "center" }); y += 4;
+    doc.text("TEL: 010-2434143 / 011-56531310 | EMAIL: tetuanhairi@gmail.com", pw / 2, y, { align: "center" }); y += 5;
+    doc.setLineWidth(0.5); doc.line(10, y, pw - 10, y); y += 6;
+
+    // Title
+    doc.setFontSize(14); doc.setFont("helvetica", "bold");
+    doc.text("RESIT", pw / 2, y, { align: "center" }); y += 8;
+
+    // Info
+    doc.setFontSize(9); doc.setFont("helvetica", "normal");
+    doc.text(`PELANGGAN:`, 10, y);
+    doc.text(`TARIKH: ${previewData.tarikhDisplay}`, pw - 10, y, { align: "right" }); y += 4;
+    if (previewData.kategori) { doc.setFontSize(8); doc.text(`[KATEGORI: ${previewData.kategori}]`, 10, y); y += 4; }
+    doc.setFontSize(10); doc.setFont("helvetica", "bold");
+    doc.text(previewData.nama, 10, y); y += 4;
+    doc.setFontSize(8); doc.setFont("helvetica", "normal");
+    if (previewData.alamat) { doc.text(previewData.alamat, 10, y); y += 4; }
+    y += 3;
+
+    // Table header
+    doc.setFillColor(44, 62, 80); doc.rect(10, y, pw - 20, 7, "F");
+    doc.setTextColor(255, 255, 255); doc.setFontSize(9); doc.setFont("helvetica", "bold");
+    doc.text("ITEM / PERKARA", 13, y + 5);
+    doc.text("JUMLAH (RM)", pw - 13, y + 5, { align: "right" });
+    doc.setTextColor(0, 0, 0); y += 7;
+
+    // Table rows
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+    previewData.items.forEach((item: ReceiptItem, i: number) => {
+      if (i % 2 === 0) { doc.setFillColor(245, 246, 250); doc.rect(10, y, pw - 20, 6, "F"); }
+      doc.rect(10, y, pw - 20, 6);
+      doc.text(item.perkara, 13, y + 4);
+      doc.text(f(item.harga), pw - 13, y + 4, { align: "right" });
+      y += 6;
+    });
+    y += 4;
+
+    // Summary
+    doc.setLineWidth(0.3); doc.line(pw / 2, y, pw - 10, y); y += 1;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(9);
+    doc.text(`JUMLAH BAYARAN: RM ${f(previewData.jumlah)}`, pw - 10, y + 4, { align: "right" }); y += 6;
+    doc.setFont("helvetica", "normal");
+    doc.text(`BAKI TERDAHULU: RM ${f(previewData.bakiTerdahulu)}`, pw - 10, y + 4, { align: "right" }); y += 6;
+    doc.setLineWidth(0.5); doc.line(pw / 2, y, pw - 10, y); y += 1;
+    doc.setFont("helvetica", "bold");
+    doc.text(`BAKI TERKINI: RM ${f(previewData.bakiTerkini)}`, pw - 10, y + 5, { align: "right" }); y += 8;
+
+    if (previewData.butiran) {
+      doc.setFont("helvetica", "normal"); doc.setFontSize(8);
+      doc.text(`BUTIRAN KES: ${previewData.butiran}`, 10, y); y += 6;
+    }
+
+    // Signature
+    y += 10;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(9);
+    doc.text("HAIRI MUSTAFA & ASSOCIATES", pw - 10, y, { align: "right" }); y += 4;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(8);
+    doc.text("Peguam Syarie & Pesuruhjaya Sumpah", pw - 10, y, { align: "right" });
+
+    // Footer
+    const fh = doc.internal.pageSize.getHeight() - 10;
+    doc.setFontSize(8); doc.setFont("helvetica", "italic"); doc.setTextColor(120, 120, 120);
+    doc.line(10, fh - 5, pw - 10, fh - 5);
+    doc.text("Resit ini dijana oleh komputer, terima kasih atas urusan anda", pw / 2, fh, { align: "center" });
+
+    doc.save(`Resit_${previewData.nama}_${previewData.tarikhDisplay}.pdf`);
+  }
+
+  const receipts = receiptsQ.data || [];
+  const filtered = receipts.filter(r => r.nama.toLowerCase().includes(search.toLowerCase()));
+  const f = (n: number) => n.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  return (
+    <div className="p-4 md:p-6 space-y-6">
+      {/* Toggle form/list on mobile */}
+      <div className="flex gap-2 md:hidden">
+        <button onClick={() => setShowForm(true)} className={`flex-1 py-2 text-xs rounded font-semibold ${showForm ? "bg-blue-600 text-white" : "bg-zinc-100 text-zinc-600"}`}>Jana Resit</button>
+        <button onClick={() => setShowForm(false)} className={`flex-1 py-2 text-xs rounded font-semibold ${!showForm ? "bg-blue-600 text-white" : "bg-zinc-100 text-zinc-600"}`}>Senarai Rekod</button>
+      </div>
+
+      <div className="flex flex-col lg:flex-row gap-6">
+        {/* ── FORM ── */}
+        <div className={`lg:w-80 xl:w-96 shrink-0 bg-white rounded-xl border border-zinc-200 shadow-sm ${!showForm ? "hidden md:block" : ""}`}>
+          <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
+            <h2 className="font-semibold text-zinc-800 text-sm">{editId ? "Kemaskini Resit" : "Jana Resit Baru"}</h2>
+            {editId && <button onClick={resetForm} className="text-xs text-zinc-400 hover:text-zinc-600"><X size={14} /></button>}
+          </div>
+          <div className="p-5 space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 mb-1">Tarikh</label>
+              <input type="date" value={tarikh} onChange={e => setTarikh(e.target.value)} className="w-full border border-zinc-200 rounded-lg px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 mb-1">Kategori</label>
+              <input list="kategoriList" value={kategori} onChange={e => setKategori(e.target.value)} className="w-full border border-zinc-200 rounded-lg px-3 py-2 text-sm" />
+              <datalist id="kategoriList">
+                <option value="DOKUMEN" /><option value="LAWYER" /><option value="PJS" />
+              </datalist>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 mb-1">Nama Pelanggan *</label>
+              <input value={nama} onChange={e => setNama(e.target.value)} placeholder="Nama penuh..." className="w-full border border-zinc-200 rounded-lg px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 mb-1">Alamat</label>
+              <textarea value={alamat} onChange={e => setAlamat(e.target.value)} rows={2} className="w-full border border-zinc-200 rounded-lg px-3 py-2 text-sm resize-none" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 mb-1">Perkara / Item</label>
+              <div className="space-y-2">
+                {items.map((item, idx) => (
+                  <div key={idx} className="flex gap-2 items-center">
+                    <input value={item.perkara} onChange={e => { const n = [...items]; n[idx].perkara = e.target.value; setItems(n); }} placeholder="Butiran..." className="flex-[3] border border-zinc-200 rounded px-2 py-1.5 text-xs" />
+                    <input type="number" step="0.01" value={item.harga || ""} onChange={e => { const n = [...items]; n[idx].harga = parseFloat(e.target.value) || 0; setItems(n); }} placeholder="RM" className="flex-1 border border-zinc-200 rounded px-2 py-1.5 text-xs" />
+                    <button onClick={() => items.length > 1 && setItems(items.filter((_, i) => i !== idx))} className="text-red-400 hover:text-red-600"><X size={13} /></button>
+                  </div>
+                ))}
+              </div>
+              <button onClick={() => setItems([...items, { perkara: "", harga: 0 }])} className="mt-2 text-xs text-blue-600 hover:text-blue-800 font-medium">+ Tambah Perkara</button>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 mb-1">Jumlah Keseluruhan (RM)</label>
+              <input readOnly value={f(jumlah)} className="w-full border border-zinc-100 bg-zinc-50 rounded-lg px-3 py-2 text-sm font-bold text-blue-700" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 mb-1">Baki Terdahulu (RM)</label>
+              <input type="number" step="0.01" value={bakiTerdahulu || ""} onChange={e => setBakiTerdahulu(parseFloat(e.target.value) || 0)} className="w-full border border-zinc-200 rounded-lg px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 mb-1">Baki Terkini (RM)</label>
+              <input readOnly value={f(bakiTerkini)} className="w-full border border-zinc-100 bg-zinc-50 rounded-lg px-3 py-2 text-sm font-bold text-emerald-700" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 mb-1">Butiran Kes (U.P)</label>
+              <input value={butiran} onChange={e => setButiran(e.target.value)} className="w-full border border-zinc-200 rounded-lg px-3 py-2 text-sm" />
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button onClick={handlePreview} className="flex-1 py-2 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-lg font-semibold hover:bg-blue-100">Preview</button>
+              <button onClick={handleSimpan} disabled={saveReceipt.isPending} className="flex-1 py-2 text-xs bg-zinc-800 text-white rounded-lg font-semibold hover:bg-zinc-700 disabled:opacity-50">
+                {saveReceipt.isPending ? "Menyimpan..." : editId ? "Kemaskini" : "Simpan"}
+              </button>
+            </div>
+            {previewData && (
+              <div className="flex gap-2">
+                <button onClick={handleCetak} className="flex-1 py-2 text-xs bg-emerald-600 text-white rounded-lg font-semibold hover:bg-emerald-700 flex items-center justify-center gap-1"><Printer size={12} />Cetak</button>
+                <button onClick={handlePDF} className="flex-1 py-2 text-xs bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 flex items-center justify-center gap-1"><Download size={12} />PDF</button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ── RIGHT: Preview + List ── */}
+        <div className={`flex-1 space-y-6 ${showForm ? "hidden md:block" : ""} lg:block`}>
+          {/* Receipt Preview */}
+          {previewData && (
+            <div id="receiptPrintArea" className="bg-white rounded-xl border border-zinc-200 shadow-sm p-6 max-w-2xl">
+              {/* Print header */}
+              <div className="flex items-start gap-3 border-b-2 border-black pb-3 mb-4">
+                <img src="https://arleta.site/interactivelink/2510/logo.png" alt="Logo" className="h-16 w-auto" onError={e => (e.currentTarget.style.display = "none")} />
+                <div>
+                  <h1 className="font-bold uppercase text-base">TETUAN HAIRI MUSTAFA & ASSOCIATES</h1>
+                  <p className="text-[11px] font-bold italic">PEGUAM SYARIE * PESURUHJAYA SUMPAH</p>
+                  <p className="text-[10px]">LOT 02, BANGUNAN ARKED MARA, 09100 BALING, KEDAH</p>
+                  <p className="text-[10px]">TEL: 010-2434143 / 011-56531310 | EMAIL: tetuanhairi@gmail.com</p>
+                </div>
+              </div>
+              <div className="flex justify-between text-xs mb-3">
+                <div>
+                  <strong>PELANGGAN:</strong><br />
+                  <span className="text-[10px] text-zinc-500">[KATEGORI: {previewData.kategori}]</span><br />
+                  <span className="font-bold text-sm">{previewData.nama}</span><br />
+                  <span className="whitespace-pre-line text-zinc-600">{previewData.alamat}</span>
+                </div>
+                <div className="text-right"><strong>TARIKH:</strong> {previewData.tarikhDisplay}</div>
+              </div>
+              <div className="text-center font-bold text-base underline mb-4">RESIT</div>
+              <table className="w-full border-collapse text-xs mb-4">
+                <thead>
+                  <tr className="bg-zinc-800 text-white">
+                    <th className="border border-zinc-700 px-3 py-2 text-left">ITEM / PERKARA</th>
+                    <th className="border border-zinc-700 px-3 py-2 text-right w-28">JUMLAH (RM)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {previewData.items.map((item: ReceiptItem, i: number) => (
+                    <tr key={i} className={i % 2 === 0 ? "bg-zinc-50" : ""}>
+                      <td className="border border-zinc-200 px-3 py-2">{item.perkara}</td>
+                      <td className="border border-zinc-200 px-3 py-2 text-right">{f(item.harga)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="flex justify-between text-xs font-semibold">
+                <div>{previewData.butiran && <p>BUTIRAN KES: <span className="underline">{previewData.butiran}</span></p>}</div>
+                <div className="text-right space-y-1">
+                  <p>JUMLAH BAYARAN: RM {f(previewData.jumlah)}</p>
+                  <p>BAKI TERDAHULU: RM {f(previewData.bakiTerdahulu)}</p>
+                  <p className="border-t border-black pt-1">BAKI TERKINI: RM {f(previewData.bakiTerkini)}</p>
+                </div>
+              </div>
+              <div className="flex justify-end mt-8">
+                <div className="text-center w-52">
+                  <img src="https://arleta.site/interactivelink/2510/cop-bulat.png" alt="Cop" className="h-20 w-auto mx-auto mb-1" onError={e => (e.currentTarget.style.display = "none")} />
+                  <p className="text-xs font-bold">HAIRI MUSTAFA & ASSOCIATES</p>
+                  <p className="text-[10px]">Peguam Syarie & Pesuruhjaya Sumpah</p>
+                </div>
+              </div>
+              <div className="mt-6 pt-3 border-t border-dashed border-zinc-300 text-center text-[10px] italic text-zinc-400">
+                Resit ini dijana oleh komputer, terima kasih atas urusan anda
+              </div>
+            </div>
+          )}
+
+          {/* Receipts List */}
+          <div className="bg-white rounded-xl border border-zinc-200 shadow-sm">
+            <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
+              <h3 className="font-semibold text-sm text-zinc-800">Senarai Rekod Resit ({receipts.length})</h3>
+              <div className="relative">
+                <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
+                <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Cari nama..." className="pl-8 pr-3 py-1.5 border border-zinc-200 rounded-lg text-xs w-44" />
+              </div>
+            </div>
+            {receiptsQ.isLoading ? (
+              <div className="p-8 text-center text-xs text-zinc-400">Memuatkan...</div>
+            ) : filtered.length === 0 ? (
+              <div className="p-8 text-center text-xs text-zinc-400">Tiada rekod resit</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="border-b border-zinc-100 bg-zinc-50 text-zinc-500">
+                    <th className="px-4 py-2.5 text-left font-medium">Tarikh</th>
+                    <th className="px-4 py-2.5 text-left font-medium">Nama Pelanggan</th>
+                    <th className="px-4 py-2.5 text-left font-medium hidden sm:table-cell">Perkara</th>
+                    <th className="px-4 py-2.5 text-right font-medium">Bayaran (RM)</th>
+                    <th className="px-4 py-2.5 text-right font-medium hidden sm:table-cell">Baki Terkini (RM)</th>
+                    <th className="px-4 py-2.5 text-center font-medium">Tindakan</th>
+                  </tr></thead>
+                  <tbody>
+                    {filtered.map(r => {
+                      const its: ReceiptItem[] = JSON.parse(r.items || "[]");
+                      return (
+                        <tr key={r.id} className="border-b border-zinc-50 hover:bg-zinc-50/50">
+                          <td className="px-4 py-2.5 text-zinc-500">{r.tarikhDisplay}</td>
+                          <td className="px-4 py-2.5 font-medium text-zinc-800">{r.nama}</td>
+                          <td className="px-4 py-2.5 text-zinc-500 hidden sm:table-cell">{its.map(i => i.perkara).join(", ")}</td>
+                          <td className="px-4 py-2.5 text-right font-medium text-blue-700">{f(r.jumlah)}</td>
+                          <td className={`px-4 py-2.5 text-right font-medium hidden sm:table-cell ${r.bakiTerkini < 0 ? "text-red-600" : r.bakiTerkini === 0 ? "text-emerald-600" : "text-amber-600"}`}>{f(r.bakiTerkini)}</td>
+                          <td className="px-4 py-2.5">
+                            <div className="flex items-center justify-center gap-1">
+                              <button onClick={() => loadEdit(r)} title="Edit" className="p-1 rounded hover:bg-amber-50 text-amber-500 hover:text-amber-700"><Edit size={12} /></button>
+                              <button onClick={() => { if (confirm(`Padam resit ${r.nama}?`)) deleteReceipt.mutate(r.id); }} title="Padam" className="p-1 rounded hover:bg-red-50 text-red-400 hover:text-red-600"><Trash2 size={12} /></button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Print-only styles */}
+      <style>{`
+        @media print {
+          body > * { display: none !important; }
+          #receiptPrintArea { display: block !important; position: fixed; top: 0; left: 0; width: 100%; }
+        }
+      `}</style>
     </div>
   );
 }

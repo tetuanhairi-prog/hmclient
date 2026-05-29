@@ -27,3 +27,20 @@ export const payments = sqliteTable("payments", {
     .notNull()
     .$defaultFn(() => new Date()),
 });
+
+export const receipts = sqliteTable("receipts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  tarikh: text("tarikh").notNull(),
+  tarikhDisplay: text("tarikh_display").notNull(),
+  kategori: text("kategori").notNull().default("DOKUMEN"),
+  nama: text("nama").notNull(),
+  alamat: text("alamat").notNull().default(""),
+  items: text("items").notNull().default("[]"), // JSON string
+  jumlah: real("jumlah").notNull().default(0),
+  bakiTerdahulu: real("baki_terdahulu").notNull().default(0),
+  bakiTerkini: real("baki_terkini").notNull().default(0),
+  butiran: text("butiran").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});

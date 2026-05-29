@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { db } from "./database";
 import * as schema from "./database/schema";
-import { eq, inArray, sql } from "drizzle-orm";
+import { eq, inArray, sql, desc } from "drizzle-orm";
 
 const app = new Hono()
   .basePath("api")
@@ -208,6 +208,60 @@ const app = new Hono()
     }
 
     return c.json({ message: "Seeded", count: seedData.length }, 201);
+  })
+
+  // ── Receipts ──
+  .get("/receipts", async (c) => {
+    const rows = await db.select().from(schema.receipts).orderBy(desc(schema.receipts.id));
+    return c.json({ receipts: rows }, 200);
+  })
+
+  .post("/receipts", async (c) => {
+    const body = await c.req.json();
+    const [row] = await db
+      .insert(schema.receipts)
+      .values({
+        tarikh: body.tarikh,
+        tarikhDisplay: body.tarikhDisplay,
+        kategori: body.kategori || "DOKUMEN",
+        nama: body.nama,
+        alamat: body.alamat || "",
+        items: JSON.stringify(body.items || []),
+        jumlah: body.jumlah,
+        bakiTerdahulu: body.bakiTerdahulu || 0,
+        bakiTerkini: body.bakiTerkini || 0,
+        butiran: body.butiran || "",
+      })
+      .returning();
+    return c.json({ receipt: row }, 201);
+  })
+
+  .put("/receipts/:id", async (c) => {
+    const id = Number(c.req.param("id"));
+    const body = await c.req.json();
+    const [row] = await db
+      .update(schema.receipts)
+      .set({
+        tarikh: body.tarikh,
+        tarikhDisplay: body.tarikhDisplay,
+        kategori: body.kategori,
+        nama: body.nama,
+        alamat: body.alamat,
+        items: JSON.stringify(body.items || []),
+        jumlah: body.jumlah,
+        bakiTerdahulu: body.bakiTerdahulu,
+        bakiTerkini: body.bakiTerkini,
+        butiran: body.butiran,
+      })
+      .where(eq(schema.receipts.id, id))
+      .returning();
+    return c.json({ receipt: row }, 200);
+  })
+
+  .delete("/receipts/:id", async (c) => {
+    const id = Number(c.req.param("id"));
+    await db.delete(schema.receipts).where(eq(schema.receipts.id, id));
+    return c.json({ success: true }, 200);
   });
 
 export type AppType = typeof app;

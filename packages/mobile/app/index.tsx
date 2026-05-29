@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   TextInput, ActivityIndicator, RefreshControl, Alert,
@@ -41,6 +41,7 @@ export default function Index() {
   const [editingCase, setEditingCase] = useState<Case | null>(null);
   const [historyCase, setHistoryCase] = useState<Case | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const seededRef = useRef(false);
 
   const casesQ = useQuery({
     queryKey: ["cases"],
@@ -55,14 +56,18 @@ export default function Index() {
     queryFn: apiClient.getChart,
   });
 
-  // Auto-seed — only after confirmed fetch (not just empty state during loading)
+  // Auto-seed — only on first ever load, never after user deletes records
   useEffect(() => {
-    if (casesQ.isFetched && casesQ.data && casesQ.data.length === 0) {
+    if (casesQ.isFetched && casesQ.data && casesQ.data.length === 0 && !seededRef.current) {
+      seededRef.current = true;
       apiClient.seed().then(() => {
         qc.invalidateQueries({ queryKey: ["cases"] });
         qc.invalidateQueries({ queryKey: ["stats"] });
         qc.invalidateQueries({ queryKey: ["chart"] });
       });
+    }
+    if (casesQ.isFetched && casesQ.data && casesQ.data.length > 0) {
+      seededRef.current = true; // data exists, mark seed as done
     }
   }, [casesQ.isFetched, casesQ.data]);
 
